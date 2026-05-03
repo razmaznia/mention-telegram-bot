@@ -25,12 +25,7 @@ from database import (
     init_db,
     # excluded
     db_add_excluded, db_remove_excluded, db_get_excluded_ids,
-    db_get_excluded_list, db_is_excluded,
-    # replies
-    db_add_reply, db_remove_reply, db_get_reply,
-    db_get_all_replies, db_increment_reply_usage, db_update_reply_chance,
-    # economy
-    db_get_balance, db_add_balance,
+    db_get_excluded_list, db_is_excluded
 )
 from groups import register_group_commands
 
@@ -469,7 +464,6 @@ async def main():
     print(f'🤖 Бот запущен: @{me.username}')
     print(f'👑 Администраторы: {config.ADMIN_IDS or "не указаны"}')
     print(f'📂 База данных: {config.DB_PATH}')
-    print(f'📁 Медиа: {config.MEDIA_DIR}/')
     print('─' * 40)
 
     # 5. Ждём до отключения
