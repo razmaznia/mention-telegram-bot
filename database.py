@@ -3,10 +3,7 @@ database.py — работа с базой данных SQLite через aiosql
 
 Таблицы:
   excluded_users  — пользователи, исключённые из упоминаний
-  replies         — кастомные ответы на триггеры
-  groups          — группы пользователей
-  group_members   — связь пользователь ↔ группа
-  economy         — баланс пользователей (задел на будущее)
+  settings - настройки бота
 """
 
 import aiosqlite
@@ -31,11 +28,93 @@ async def init_db():
                 added_at    TEXT    DEFAULT (datetime('now'))
             )
         """)
+        
+         # Таблица настроек
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        ''')
+
+        # Настройки по умолчанию
+        defaults = {
+            'ping_text': 'В течение Золотого рубежа мы будем каждый день пинговать вас с просьбой зайти в игру, если вы не из нашей гильдии нажмите на кнопку ниже, если ничего не происходит, попробуйте позже - бот оффлайн',
+            'use_local_admins': 'true',
+            'mention_delay_normal': '1',
+            'mention_delay_chunk': '3',
+            'mention_chunk_size': '5',
+        }
+        for k, v in defaults.items():
+            await db.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                (k, v)
+            )
 
         await db.commit()
     print("✅ База данных инициализирована")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Настройки бота (settings)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def db_get_setting(key: str, default: str = '') -> str:
+    """Получить значение настройки по ключу."""
+    try:
+        async with aiosqlite.connect(config.DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
+            return row['value'] if row else default
+    except Exception as e:
+        print(f"❌ db_get_setting: {e}")
+        return default
+
+
+async def db_set_setting(key: str, value: str) -> bool:
+    """Установить значение настройки."""
+    try:
+        async with aiosqlite.connect(config.DB_PATH) as db:
+            await db.execute(
+                """INSERT OR REPLACE INTO settings (key, value, updated_at)
+                   VALUES (?, ?, datetime('now'))""",
+                (key, value)
+            )
+            await db.commit()
+            return db.total_changes > 0
+    except Exception as e:
+        print(f"❌ db_set_setting: {e}")
+        return False
+
+
+async def db_get_all_settings() -> dict:
+    """Получить все настройки в виде словаря {key: value}."""
+    try:
+        async with aiosqlite.connect(config.DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT key, value FROM settings ORDER BY key")
+            rows = await cursor.fetchall()
+            return {row['key']: row['value'] for row in rows}
+    except Exception as e:
+        print(f"❌ db_get_all_settings: {e}")
+        return {}
+
+
+async def db_reset_setting(key: str) -> bool:
+    """Сбросить настройку (удалить, будет использоваться значение по умолчанию)."""
+    try:
+        async with aiosqlite.connect(config.DB_PATH) as db:
+            await db.execute("DELETE FROM settings WHERE key = ?", (key,))
+            await db.commit()
+            return db.total_changes > 0
+    except Exception as e:
+        print(f"❌ db_reset_setting: {e}")
+        return False
+    
 # ─────────────────────────────────────────────────────────────────────────────
 # Excluded users
 # ─────────────────────────────────────────────────────────────────────────────
