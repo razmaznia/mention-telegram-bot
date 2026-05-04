@@ -25,9 +25,10 @@ from database import (
     init_db,
     # excluded
     db_add_excluded, db_remove_excluded, db_get_excluded_ids,
-    db_get_excluded_list, db_is_excluded
+    db_get_excluded_list, db_is_excluded,
+    # settings
+    db_get_setting, db_set_setting, db_get_all_settings,
 )
-from groups import register_group_commands
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Конфигурация
@@ -64,12 +65,14 @@ async def is_admin(event) -> bool:
         return True
 
     # Администраторы конкретной группы
-    try:
-        perms = await client.get_permissions(event.chat_id, uid)
-        if perms.is_admin or perms.is_creator:
-            return True
-    except Exception:
-        pass
+    use_local = await db_get_setting('use_local_admins', 'true')
+    if use_local == 'true':
+        try:
+            perms = await client.get_permissions(event.chat_id, uid)
+            if perms.is_admin or perms.is_creator:
+                return True
+        except Exception:
+            pass
 
     return False
 
@@ -144,19 +147,23 @@ async def send_mentions(event, text: str = ''):
     if not users:
         return await event.reply('Нет пользователей для упоминания.')
 
-    chunk_size = 5
+    chunk_size = int(await db_get_setting('mention_chunk_size', '5'))
+    delay_normal = float(await db_get_setting('mention_delay_normal', '1'))
+    delay_chunk = float(await db_get_setting('mention_delay_chunk', '3'))
     chunks = [users[i:i + chunk_size] for i in range(0, len(users), chunk_size)]
     sent = 0
 
     for chunk in chunks:
         mentions = ' '.join(_mention_str(u) for u in chunk)
         msg = f'{text}\n{mentions}' if text else mentions
-        buttons = [[Button.inline('🔕 Не получать пинг', b'mute_ping')]]
+        buttons = [[Button.inline('🔕 Не получать пинг', b'mute_ping')],
+                    [Button.inline('🔔 Получать пинг', b'unmute_ping')],
+                ]
 
         try:
             await event.respond(msg, buttons=buttons, parse_mode='markdown')
             sent += 1
-            await asyncio.sleep(3 if sent % 3 == 0 else 1)
+            await asyncio.sleep(delay_chunk if sent % 3 == 0 else delay_normal)
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
         except Exception as e:
@@ -180,7 +187,8 @@ async def cmd_start(event):
         "`/add_excluded` — добавить в исключения (reply / @username)\n"
         "`/remove_excluded` — убрать из исключений\n"
         "`/list_excluded` — список исключённых\n"
-        "`/list_excluded_panel` — панель управления исключениями (кнопки)\n\n"
+        "`/list_excluded_panel` — панель управления исключениями (кнопки)\n"
+        "`/settings` — настройки функций\n\n"
 
         f"👑 Глобальные администраторы: {', '.join(map(str, config.ADMIN_IDS)) or 'не указаны'}"
     )
@@ -262,7 +270,7 @@ async def _send_excluded_panel(event, edit=False):
         buttons.append(row)
 
     # Кнопка закрытия
-    buttons.append([Button.inline('✅ Закрыть', b'excl_panel_close')])
+    buttons.append([Button.inline('✅ Закрыть', b'panel_close')])
 
     total = len(users)
     excl_count = sum(1 for u in users if u.id in excluded_ids)
@@ -299,6 +307,18 @@ async def callback_handler(event):
             else:
                 await db_add_excluded(event.sender_id, user.first_name or '', user.username or '')
                 await event.answer('✅ Вы больше не будете получать пинги!', alert=True)
+        except Exception as e:
+            await event.answer(f'❌ Ошибка: {e}', alert=True)
+        return
+    
+    if data == b'unmute_ping':
+        try:
+            user = await client.get_entity(event.sender_id)
+            if not await db_is_excluded(event.sender_id):
+                await event.answer('⚠️ Вы не в списке исключений!', alert=True)
+            else:
+                await db_remove_excluded(event.sender_id)
+                await event.answer('✅ Вы снова будете получать пинги!', alert=True)
         except Exception as e:
             await event.answer(f'❌ Ошибка: {e}', alert=True)
         return
@@ -343,9 +363,57 @@ async def callback_handler(event):
 
         # Обновляем панель
         await _send_excluded_panel(event, edit=True)
+	
+     # ── Настройки: изменить текст /ping ────────────────────────────────────
+    elif data == b'set_ping_text':
+        waiting_states[(event.chat_id, event.sender_id)] = {'mode': 'set_ping_text'}
+        await event.edit(
+            '✏️ Отправьте новый текст для команды /ping.\n\n'
+            'Просто напишите сообщение в чат.',
+            buttons=[[Button.inline('❌ Отмена', b'settings_cancel')]]
+        )
 
+    # ── Настройки: переключить локальных админов ──────────────────────────
+    elif data == b'toggle_local_admins':
+        current = await db_get_setting('use_local_admins', 'true')
+        new_value = 'false' if current == 'true' else 'true'
+        await db_set_setting('use_local_admins', new_value)
+        await _send_settings_panel(event, edit=True)
+
+    # ── Настройки: задержка обычная ───────────────────────────────────────
+    elif data == b'set_delay_normal':
+        waiting_states[(event.chat_id, event.sender_id)] = {'mode': 'set_delay_normal'}
+        await event.edit(
+            '⏱ Отправьте обычную задержку между сообщениями (в секундах).\n\n'
+            'Например: 1.5',
+            buttons=[[Button.inline('❌ Отмена', b'settings_cancel')]]
+        )
+
+    # ── Настройки: задержка чанк ──────────────────────────────────────────
+    elif data == b'set_delay_chunk':
+        waiting_states[(event.chat_id, event.sender_id)] = {'mode': 'set_delay_chunk'}
+        await event.edit(
+            '⏱ Отправьте задержку после группы сообщений (в секундах).\n\n'
+            'Например: 3',
+            buttons=[[Button.inline('❌ Отмена', b'settings_cancel')]]
+        )
+
+    # ── Настройки: размер чанка ───────────────────────────────────────────
+    elif data == b'set_chunk_size':
+        waiting_states[(event.chat_id, event.sender_id)] = {'mode': 'set_chunk_size'}
+        await event.edit(
+            '📦 Отправьте размер чанка (сколько человек в одном сообщении).\n\n'
+            'От 1 до 50. Например: 5',
+            buttons=[[Button.inline('❌ Отмена', b'settings_cancel')]]
+        )
+
+    # ── Настройки: отмена ─────────────────────────────────────────────────
+    elif data == b'settings_cancel':
+        waiting_states.pop((event.chat_id, event.sender_id), None)
+        await _send_settings_panel(event, edit=True)
+    
     # ── Панель исключений: закрыть ─────────────────────────────────────────
-    elif data == b'excl_panel_close':
+    elif data == b'panel_close':
         try:
             await event.delete()
         except Exception:
@@ -405,6 +473,55 @@ async def cmd_list_excluded(event):
         lines.append(f'• {name}')
     await event.reply('📋 **Исключённые пользователи:**\n' + '\n'.join(lines), parse_mode='markdown')
 
+@client.on(events.NewMessage(pattern=r'^/settings(@\w+)?$'))
+async def cmd_settings(event):
+    """Показывает панель управления настройками с кнопками."""
+    if not await is_admin(event):
+        return await event.reply('❌ Только для администраторов.')
+
+    await _send_settings_panel(event)
+
+
+async def _send_settings_panel(event, edit=False):
+    """Формирует и отправляет панель настроек."""
+    settings = await db_get_all_settings()
+    
+    ping_text = settings.get('ping_text', 'Не задан')
+    ping_preview = ping_text[:50] + '...' if len(ping_text) > 50 else ping_text
+    
+    use_local = settings.get('use_local_admins', 'true')
+    local_status = '✅ Вкл' if use_local == 'true' else '❌ Выкл'
+    
+    delay_normal = settings.get('mention_delay_normal', '1')
+    delay_chunk = settings.get('mention_delay_chunk', '3')
+    chunk_size = settings.get('mention_chunk_size', '5')
+    
+    text = (
+        "⚙️ **Настройки бота**\n\n"
+        f"📝 **Текст /ping:** {ping_preview}\n"
+        f"👥 **Админы группы:** {local_status}\n"
+        f"⏱ **Задержка каждое соо:** {delay_normal}с\n"
+        f"⏱ **Задержка каждые 3 соо:** {delay_chunk}с\n"
+        f"📦 **Кол-во пингов в соо:** {chunk_size} чел.\n"
+    )
+    
+    buttons = [
+        [Button.inline('📝 Изменить текст /ping', b'set_ping_text'),
+        Button.inline('👥 Локальные админы: ВКЛ/ВЫКЛ', b'toggle_local_admins')],
+        [Button.inline('⏱ Задержка обычная', b'set_delay_normal'),
+        Button.inline('⏱ Задержка чанк', b'set_delay_chunk')],
+        [Button.inline('📦 Размер чанка', b'set_chunk_size'),
+        Button.inline('✅ Закрыть', b'panel_close')],
+    ]
+    
+    if edit:
+        try:
+            await event.edit(text, buttons=buttons, parse_mode='markdown')
+        except Exception:
+            pass
+    else:
+        await event.reply(text, buttons=buttons, parse_mode='markdown')    
+    
 # ── Глобальный обработчик входящих сообщений (триггеры + состояния) ──────────
 
 
@@ -434,15 +551,12 @@ async def global_message_handler(event):
 
 @client.on(events.NewMessage(pattern=r'^/ping(@\w+)?$'))
 async def ping_command(event):
-    text = (
-        "В течение Золотого рубежа мы будем каждый день пинговать вас "
-        "с просьбой зайти в игру, если вы не из нашей гильдии нажмите "
-        "на кнопку ниже, если ничего не происходит, попробуйте позже - "
-        "бот оффлайн"
-    )
+    text = await db_get_setting('ping_text', 
+        'В течение Золотого рубежа мы будем каждый день пинговать вас...')
 
     buttons = [
-        [Button.inline('🔕 Не получать пинг', 'mute_ping')]
+        [Button.inline('🔕 Не получать пинг', b'mute_ping')],
+        [Button.inline('🔔 Получать пинг', b'unmute_ping')],
     ]
 
     await event.reply(text, buttons=buttons)
